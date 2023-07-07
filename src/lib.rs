@@ -1,8 +1,12 @@
+use std::error::Error;
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
-pub mod utils;
+pub type ChatError = Box<dyn Error + Send + Sync + 'static>;
+pub type ChatResult<T> = Result<T, ChatError>;
+
+pub mod conn;
 
 #[derive(Debug, Deserialize, Serialize, PartialEq)]
 pub enum FromClient {
