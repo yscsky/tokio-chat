@@ -12,5 +12,11 @@ async fn main() -> ChatResult<()> {
         group_name: Arc::new("group1".into()),
     };
     conn.send(&join_cmd).await?;
+
+    let post_cmd = FromClient::Post {
+        group_name: Arc::new("group1".into()),
+        message: Arc::new("hello".into()),
+    };
+    conn.send(&post_cmd).await?;
     Ok(())
 }

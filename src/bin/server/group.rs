@@ -3,8 +3,11 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use tokio::sync::broadcast;
-use tokio_chat::conn::Connection;
+use tokio::sync::{
+    broadcast::{self, error::RecvError},
+    mpsc::Sender,
+};
+use tokio_chat::FromServer;
 
 pub struct GroupTable(Mutex<HashMap<Arc<String>, Arc<Group>>>);
 
@@ -35,15 +38,12 @@ impl GroupTable {
 impl Group {
     pub fn new(name: Arc<String>) -> Group {
         let (sender, _) = broadcast::channel(1000);
-        Group {
-            name: name,
-            sender: sender,
-        }
+        Group { name, sender }
     }
 
-    pub fn join(&self, conn: &mut Connection) {
+    pub fn join(&self, tx: Sender<FromServer>) {
         let receiver = self.sender.subscribe();
-        // tokio::spawn(handle_subscribler(self.name.clone(), receiver, conn));
+        tokio::spawn(handle_subscribler(self.name.clone(), receiver, tx));
     }
 
     pub fn post(&self, message: Arc<String>) {
@@ -54,6 +54,21 @@ impl Group {
 async fn handle_subscribler(
     group_name: Arc<String>,
     mut receiver: broadcast::Receiver<Arc<String>>,
-    conn: &mut Connection,
+    tx: Sender<FromServer>,
 ) {
+    loop {
+        let packet = match receiver.recv().await {
+            Ok(message) => FromServer::Message {
+                group_name: group_name.clone(),
+                message: message.clone(),
+            },
+            Err(RecvError::Lagged(n)) => {
+                FromServer::Error(format!("Dropped {n} messages from {group_name}"))
+            }
+            Err(RecvError::Closed) => break,
+        };
+        if tx.send(packet).await.is_err() {
+            break;
+        }
+    }
 }
