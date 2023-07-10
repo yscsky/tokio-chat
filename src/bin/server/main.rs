@@ -1,11 +1,9 @@
 use std::{env, future::Future, sync::Arc};
 
-use conn::Connection;
 use group::GroupTable;
-use tokio::{net::TcpListener, signal};
-use tokio_chat::{ChatResult, FromClient, FromServer};
+use tokio::{net::TcpListener, signal, sync::mpsc};
+use tokio_chat::{conn::Connection, ChatResult, FromClient, FromServer};
 
-mod conn;
 mod group;
 
 #[tokio::main]
@@ -32,13 +30,16 @@ async fn run(listener: TcpListener, shutdown: impl Future) {
 async fn serve(listener: TcpListener) -> ChatResult<()> {
     let chat_group_table = Arc::new(GroupTable::new());
     loop {
-        let (socket, _) = listener.accept().await?;
+        let (socket, addr) = listener.accept().await?;
+        println!("accept:{}", addr);
         let groups = chat_group_table.clone();
-        tokio::spawn(async {
-            Connection::run(socket, move |msg, tx| {
+        tokio::spawn(async move {
+            let (sender, mut receiver) = mpsc::channel(100);
+            let tx = Connection::run(socket, sender).await;
+            while let Some(msg) = receiver.recv().await {
                 let res = match msg {
                     FromClient::Join { group_name } => {
-                        println!("client join {}", group_name);
+                        println!("client {} join {}", addr, group_name);
                         let group = groups.get_or_create(group_name);
                         group.join(tx.clone());
                         Ok(())
@@ -48,7 +49,7 @@ async fn serve(listener: TcpListener) -> ChatResult<()> {
                         message,
                     } => match groups.get(&group_name) {
                         Some(group) => {
-                            println!("client post {} in {}", message, group_name);
+                            println!("client {} post {} in {}", addr, message, group_name);
                             group.post(message);
                             Ok(())
                         }
@@ -57,12 +58,9 @@ async fn serve(listener: TcpListener) -> ChatResult<()> {
                 };
                 if let Err(message) = res {
                     let report = FromServer::Error(message);
-                    let tx = tx.clone();
-                    tokio::spawn(async move {
-                        tx.send(report).await.unwrap();
-                    });
+                    tx.send(report).await.unwrap();
                 }
-            });
+            }
         });
     }
 }

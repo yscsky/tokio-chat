@@ -5,51 +5,74 @@ use tokio::{
         tcp::{OwnedReadHalf, OwnedWriteHalf},
         TcpStream,
     },
+    sync::mpsc::{self, Receiver, Sender},
 };
 
-use crate::ChatResult;
-
-pub struct Connection {
-    buf_write: BufWriter<OwnedWriteHalf>,
-    buf_read: BufReader<OwnedReadHalf>,
-}
+pub struct Connection;
 
 impl Connection {
-    pub fn new(socket: TcpStream) -> Connection {
-        let (read, write) = socket.into_split();
-        Connection {
-            buf_write: BufWriter::new(write),
-            buf_read: BufReader::new(read),
+    pub async fn run<R, S>(socket: TcpStream, sender: Sender<R>) -> Sender<S>
+    where
+        R: DeserializeOwned + Send + 'static,
+        S: Serialize + Send + 'static,
+    {
+        let (reader, writer) = socket.into_split();
+        let (tx, rx) = mpsc::channel::<S>(100);
+        let ret = tx.clone();
+
+        tokio::spawn(async {
+            let mut read_task = tokio::spawn(async {
+                Self::read(reader, sender).await;
+            });
+            let mut write_task = tokio::spawn(async {
+                Self::write(writer, rx).await;
+            });
+            if tokio::try_join!(&mut read_task, &mut write_task).is_err() {
+                eprintln!("read_task/write_task terminated");
+                read_task.abort();
+                write_task.abort();
+            }
+        });
+
+        ret
+    }
+
+    async fn read<R>(reader: OwnedReadHalf, sender: Sender<R>)
+    where
+        R: DeserializeOwned,
+    {
+        let mut buf_reader = BufReader::new(reader);
+        loop {
+            let mut line = String::new();
+            match buf_reader.read_line(&mut line).await {
+                Err(e) => {
+                    eprintln!("read from client error: {e}");
+                    break;
+                }
+                Ok(0) => {
+                    println!("client closed");
+                    break;
+                }
+                Ok(_) => {
+                    // println!("read: {}", line);
+                    let msg: R = serde_json::from_str(&line).unwrap();
+                    sender.send(msg).await.unwrap();
+                }
+            }
         }
     }
 
-    pub async fn read(&mut self) -> ChatResult<String> {
-        let mut line = String::new();
-        self.buf_read.read_line(&mut line).await?;
-        Ok(line)
-    }
-
-    pub async fn wirte(&mut self, msg: &mut String) -> ChatResult<()> {
-        msg.push('\n');
-        self.buf_write.write_all(msg.as_bytes()).await?;
-        self.buf_write.flush().await?;
-        Ok(())
-    }
-
-    pub async fn send<T>(&mut self, msg: &T) -> ChatResult<()>
+    async fn write<S>(writer: OwnedWriteHalf, mut rx: Receiver<S>)
     where
-        T: Serialize,
+        S: Serialize,
     {
-        let mut json = serde_json::to_string(&msg)?;
-        self.wirte(&mut json).await
-    }
-
-    pub async fn receive<T>(&mut self) -> ChatResult<T>
-    where
-        T: DeserializeOwned,
-    {
-        let line = self.read().await?;
-        let p = serde_json::from_str::<T>(&line)?;
-        Ok(p)
+        let mut buf_writer = BufWriter::new(writer);
+        while let Some(msg) = rx.recv().await {
+            let mut json = serde_json::to_string(&msg).unwrap();
+            json.push('\n');
+            // println!("write: {}", json);
+            buf_writer.write_all(json.as_bytes()).await.unwrap();
+            buf_writer.flush().await.unwrap();
+        }
     }
 }
